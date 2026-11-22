@@ -46,7 +46,7 @@ echo "2^10" | calc --json
 
 ## Notes
 
-All positional arguments are joined with spaces before evaluation, so `calc 2 + 3` and `calc "2 + 3"` are equivalent. Use `-` or pipe input to read the expression from stdin; newlines are treated as whitespace.
+All positional arguments are joined with spaces before evaluation, so `calc 2 + 3` and `calc "2 + 3"` are equivalent. Use `-` or pipe input to read the expression from stdin; newlines are treated as whitespace. Running `calc` with no arguments prints help, unless stdin is piped, in which case the expression is read from it.
 
 Exit codes: 0 success, 2 invalid expression or usage error. Errors go to stderr and results to stdout, so pipelines stay clean. Help output is unstyled, with no color or bold text.
 

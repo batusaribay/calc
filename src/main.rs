@@ -20,6 +20,11 @@ fn run() -> u8 {
         Err(msg) => return usage_error(&msg),
     };
 
+    if opts.expression.is_none() && io::stdin().is_terminal() {
+        print_help();
+        return EXIT_OK;
+    }
+
     let source = match resolve_expression(&opts) {
         Ok(source) => source,
         Err(msg) => return usage_error(&msg),
@@ -178,7 +183,6 @@ fn emit(line: &str) -> Result<(), String> {
 fn print_help() {
     println!(
         "\
-calc {VERSION}
 A Rust CLI to evaluate arithmetic expressions
 
 Usage:
