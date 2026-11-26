@@ -2,10 +2,18 @@
 name = "calc"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "A Rust CLI to evaluate arithmetic expressions"
 license = "MIT"
 repository = "https://github.com/batusaribay/calc"
 
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
 [profile.release]
 lto = true
 strip = true
+
+[lints.rust]
+unsafe_code = "forbid"

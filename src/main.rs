@@ -1,3 +1,5 @@
+mod config;
+
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
@@ -5,6 +7,8 @@ use std::process::ExitCode;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_PRECISION: usize = 12;
 const MAX_PRECISION: usize = 15;
+const MAX_NESTING: usize = 256;
+const MAX_STDIN_BYTES: u64 = 1024 * 1024;
 
 const EXIT_OK: u8 = 0;
 const EXIT_ERROR: u8 = 2;
@@ -14,16 +18,34 @@ fn main() -> ExitCode {
 }
 
 fn run() -> u8 {
-    let opts = match parse_args(env::args().skip(1).collect()) {
+    let args = match env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string())
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(args) => args,
+        Err(_) => return usage_error("arguments must be valid UTF-8"),
+    };
+    let opts = match parse_args(args) {
         Ok(Some(opts)) => opts,
         Ok(None) => return EXIT_OK,
         Err(msg) => return usage_error(&msg),
     };
-
     if opts.expression.is_none() && io::stdin().is_terminal() {
-        print_help();
-        return EXIT_OK;
+        return match print_help() {
+            Ok(()) => EXIT_OK,
+            Err(msg) => usage_error(&msg),
+        };
     }
+
+    let config = match config::load() {
+        Ok(config) => config,
+        Err(msg) => return usage_error(&msg),
+    };
+    let precision = opts
+        .precision
+        .or(config.precision)
+        .unwrap_or(DEFAULT_PRECISION);
 
     let source = match resolve_expression(&opts) {
         Ok(source) => source,
@@ -32,7 +54,7 @@ fn run() -> u8 {
 
     match evaluate(&source) {
         Ok(value) => {
-            let display = format_number(value, opts.precision);
+            let display = format_number(value, precision);
             let line = if opts.json {
                 format!(
                     "{{\"expression\":{},\"value\":{},\"display\":{}}}",
@@ -74,29 +96,29 @@ fn usage_error(msg: &str) -> u8 {
 
 struct Options {
     json: bool,
-    precision: usize,
+    precision: Option<usize>,
     expression: Option<String>,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Option<Options>, String> {
     let mut json = false;
-    let mut precision = DEFAULT_PRECISION;
+    let mut precision = None;
     let mut parts: Vec<String> = Vec::new();
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
-                print_help();
+                print_help()?;
                 return Ok(None);
             }
             "-V" | "--version" => {
-                println!("calc {VERSION}");
+                emit(&format!("calc {VERSION}"))?;
                 return Ok(None);
             }
             "-j" | "--json" => json = true,
             "-p" | "--precision" => match args.next() {
-                Some(value) => precision = parse_precision(&value)?,
+                Some(value) => precision = Some(parse_precision(&value)?),
                 None => return Err("option `--precision` requires a value".into()),
             },
             "--" => {
@@ -105,13 +127,9 @@ fn parse_args(args: Vec<String>) -> Result<Option<Options>, String> {
             }
             _ => {
                 if let Some(value) = arg.strip_prefix("--precision=") {
-                    precision = parse_precision(value)?;
+                    precision = Some(parse_precision(value)?);
                 } else if let Some(value) = arg.strip_prefix("-p") {
-                    if value.bytes().all(|b| b.is_ascii_digit()) && !value.is_empty() {
-                        precision = parse_precision(value)?;
-                    } else {
-                        parts.push(arg);
-                    }
+                    precision = Some(parse_precision(value)?);
                 } else if arg.starts_with("--") {
                     return Err(format!("unknown option `{arg}`"));
                 } else {
@@ -161,9 +179,16 @@ fn resolve_expression(opts: &Options) -> Result<String, String> {
 fn read_stdin() -> Result<String, String> {
     let mut input = String::new();
     io::stdin()
+        .lock()
+        .take(MAX_STDIN_BYTES + 1)
         .read_to_string(&mut input)
         .map_err(|e| format!("cannot read stdin: {e}"))?;
 
+    if input.len() as u64 > MAX_STDIN_BYTES {
+        return Err(format!(
+            "expression exceeds the {MAX_STDIN_BYTES}-byte stdin limit"
+        ));
+    }
     let input = input.trim();
     if input.is_empty() {
         return Err("empty expression".into());
@@ -180,8 +205,8 @@ fn emit(line: &str) -> Result<(), String> {
     }
 }
 
-fn print_help() {
-    println!(
+fn print_help() -> Result<(), String> {
+    emit(
         "\
 A Rust CLI to evaluate arithmetic expressions
 
@@ -214,8 +239,8 @@ Numbers:
   Decimal, scientific notation, and _ separators: 3.5, 1e-3, 1_000
 
 Exit codes:
-  0 success, 2 invalid expression or usage error"
-    );
+  0 success, 2 invalid expression or usage error",
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -280,6 +305,11 @@ fn lex(source: &str) -> Result<Vec<(Token, usize)>, Error> {
                     }
                 }
 
+                let mantissa = &source[start..i];
+                if !valid_separators(mantissa) {
+                    return Err(Error::new(format!("invalid number `{mantissa}`"), start));
+                }
+
                 if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
                     number.push('e');
                     i += 1;
@@ -287,19 +317,27 @@ fn lex(source: &str) -> Result<Vec<(Token, usize)>, Error> {
                         number.push(bytes[i] as char);
                         i += 1;
                     }
-                    let digits = i;
-                    while i < bytes.len() && bytes[i].is_ascii_digit() {
-                        number.push(bytes[i] as char);
+                    let exponent_start = i;
+                    let mut digits = 0;
+                    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
+                        if bytes[i].is_ascii_digit() {
+                            number.push(bytes[i] as char);
+                            digits += 1;
+                        }
                         i += 1;
                     }
-                    if i == digits {
+                    if digits == 0 {
                         return Err(Error::new("invalid exponent", i));
+                    }
+                    let exponent = &source[exponent_start..i];
+                    if !valid_separators(exponent) {
+                        return Err(Error::new("invalid exponent", exponent_start));
                     }
                 }
 
                 let value = number
                     .parse::<f64>()
-                    .map_err(|_| Error::new(format!("invalid number `{number}`"), start))?;
+                    .map_err(|_| Error::new(format!("invalid number `{mantissa}`"), start))?;
                 tokens.push((Token::Number(value), start));
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
@@ -356,12 +394,24 @@ fn lex(source: &str) -> Result<Vec<(Token, usize)>, Error> {
     Ok(tokens)
 }
 
+fn valid_separators(literal: &str) -> bool {
+    let bytes = literal.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'_'
+            || (index > 0
+                && index + 1 < bytes.len()
+                && bytes[index - 1].is_ascii_digit()
+                && bytes[index + 1].is_ascii_digit())
+    })
+}
+
 fn evaluate(source: &str) -> Result<f64, Error> {
     let tokens = lex(source)?;
     let mut parser = Parser {
         tokens: &tokens,
         pos: 0,
         end: source.len(),
+        depth: 0,
     };
 
     let value = parser.expression()?;
@@ -375,6 +425,7 @@ struct Parser<'a> {
     tokens: &'a [(Token, usize)],
     pos: usize,
     end: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -391,6 +442,19 @@ impl Parser<'_> {
             .get(self.pos)
             .map(|(_, pos)| *pos)
             .unwrap_or(self.end)
+    }
+
+    fn nested(&mut self, parse: fn(&mut Self) -> Result<f64, Error>) -> Result<f64, Error> {
+        if self.depth >= MAX_NESTING {
+            return Err(Error::new(
+                format!("expression nesting exceeds {MAX_NESTING} levels"),
+                self.position(),
+            ));
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
     }
 
     fn expression(&mut self) -> Result<f64, Error> {
@@ -435,11 +499,11 @@ impl Parser<'_> {
         match self.peek() {
             Some(Token::Minus) => {
                 self.pos += 1;
-                Ok(-self.unary()?)
+                Ok(-self.nested(Parser::unary)?)
             }
             Some(Token::Plus) => {
                 self.pos += 1;
-                self.unary()
+                self.nested(Parser::unary)
             }
             _ => self.power(),
         }
@@ -449,7 +513,7 @@ impl Parser<'_> {
         let base = self.primary()?;
         if self.peek() == Some(&Token::Caret) {
             self.pos += 1;
-            let exponent = self.unary()?;
+            let exponent = self.nested(Parser::unary)?;
             Ok(base.powf(exponent))
         } else {
             Ok(base)
@@ -465,7 +529,7 @@ impl Parser<'_> {
         match token {
             Token::Number(value) => Ok(value),
             Token::LParen => {
-                let value = self.expression()?;
+                let value = self.nested(Parser::expression)?;
                 match self.peek() {
                     Some(Token::RParen) => {
                         self.pos += 1;
@@ -480,7 +544,7 @@ impl Parser<'_> {
                     let mut args = Vec::new();
                     if self.peek() != Some(&Token::RParen) {
                         loop {
-                            args.push(self.expression()?);
+                            args.push(self.nested(Parser::expression)?);
                             if self.peek() == Some(&Token::Comma) {
                                 self.pos += 1;
                             } else {
@@ -681,6 +745,29 @@ mod tests {
     fn numbers_and_separators() {
         assert_eq!(eval("1_000 / 4"), 250.0);
         assert_eq!(eval("1e3 + .5"), 1000.5);
+        assert_eq!(eval("1e1_0"), 10_000_000_000.0);
+    }
+
+    #[test]
+    fn rejects_misplaced_numeric_separators() {
+        for source in ["1__0", "1_", "1_.0", "1._0", "1e_2", "1e2_", "1e2__3"] {
+            assert!(evaluate(source).is_err(), "accepted {source}");
+        }
+    }
+
+    #[test]
+    fn rejects_excessive_recursion() {
+        let unary = format!("{}1", "-".repeat(MAX_NESTING + 1));
+        let parentheses = format!(
+            "{}1{}",
+            "(".repeat(MAX_NESTING + 1),
+            ")".repeat(MAX_NESTING + 1)
+        );
+        let powers = format!("1{}", "^1".repeat(MAX_NESTING + 1));
+        for source in [unary, parentheses, powers] {
+            let error = evaluate(&source).unwrap_err();
+            assert!(error.msg.contains("nesting exceeds"));
+        }
     }
 
     #[test]

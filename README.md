@@ -2,6 +2,8 @@
 
 A Rust CLI to evaluate arithmetic expressions
 
+![calc in a terminal](preview.png)
+
 ## Why this exists
 
 Doing arithmetic in a shell usually means `bc`, `awk`, or opening a REPL, each with its own syntax and output quirks. `calc` takes one expression, evaluates it with ordinary operator precedence, prints a clean number, and optionally emits JSON. It is a single small binary with no runtime dependencies, so it works the same in an interactive shell, a script, or a CI job.
@@ -31,9 +33,7 @@ Options:
   -V, --version         Print version
 ```
 
-Operators are `+ - * / % ^ ( )` and functions are `sqrt cbrt abs ln log log2 exp sin cos tan asin acos atan floor ceil round trunc sign pow atan2 min max`. Constants are `pi`, `e`, and `tau`. Numbers accept decimal and scientific notation and `_` separators, as in `1_000` or `1e-3`.
-
-Examples:
+Operators are `+ - * / % ^ ( )` and functions are `sqrt cbrt abs ln log log2 exp sin cos tan asin acos atan floor ceil round trunc sign pow atan2 min max`. Constants are `pi`, `e`, and `tau`. Numbers accept decimal and scientific notation and single `_` separators between digits, as in `1_000`, `1e-3`, or `1e1_0`.
 
 ```bash
 calc "2 + 3 * 4"
@@ -46,11 +46,11 @@ echo "2^10" | calc --json
 
 ## Notes
 
-All positional arguments are joined with spaces before evaluation, so `calc 2 + 3` and `calc "2 + 3"` are equivalent. Use `-` or pipe input to read the expression from stdin; newlines are treated as whitespace. Running `calc` with no arguments prints help, unless stdin is piped, in which case the expression is read from it.
+All positional arguments are joined with spaces before evaluation, so `calc 2 + 3` and `calc "2 + 3"` are equivalent. Use `-` or pipe input to read the expression from stdin.
 
-Exit codes: 0 success, 2 invalid expression or usage error. Errors go to stderr and results to stdout, so pipelines stay clean. Help output is unstyled, with no color or bold text.
+## Config
 
-`calc` does not keep history, config, or state. Every run is independent and non-interactive.
+Reads `~/.config/calc/config.toml` if present. Flags override the file; defaults apply otherwise.
 
 ## Install
 
@@ -59,8 +59,6 @@ Exit codes: 0 success, 2 invalid expression or usage error. Errors go to stderr 
 ```bash
 cargo install --git https://github.com/batusaribay/calc.git --locked
 ```
-
-`cargo install` places the binary in `~/.cargo/bin`, which the Rust installer puts on `PATH`.
 
 ## License
 

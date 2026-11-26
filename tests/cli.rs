@@ -13,6 +13,23 @@ fn stdout(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn calc_with_stdin(args: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_calc"))
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn calc");
+    child
+        .stdin
+        .take()
+        .expect("missing stdin")
+        .write_all(input)
+        .expect("failed to write stdin");
+    child.wait_with_output().expect("failed to wait for calc")
+}
+
 #[test]
 fn evaluates_arguments_as_one_expression() {
     let out = calc(&["2", "+", "3", "*", "4"]);
@@ -46,20 +63,44 @@ fn invalid_expression_exits_with_2() {
 
 #[test]
 fn reads_piped_stdin() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_calc"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn calc");
-
-    child
-        .stdin
-        .as_mut()
-        .expect("missing stdin")
-        .write_all(b"6 * 7\n")
-        .expect("failed to write stdin");
-
-    let out = child.wait_with_output().expect("failed to wait for calc");
+    let out = calc_with_stdin(&[], b"6 * 7\n");
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
+}
+
+#[test]
+fn rejects_excessive_nesting_without_crashing() {
+    let expression = format!("{}1{}", "(".repeat(4096), ")".repeat(4096));
+    let out = calc(&["--", &expression]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nesting exceeds 256 levels"));
+}
+
+#[test]
+fn rejects_an_invalid_attached_precision() {
+    let out = calc(&["-pfoo", "1/3"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid precision `foo`"));
+}
+
+#[test]
+fn limits_stdin_input() {
+    let out = calc_with_stdin(&[], &vec![b'1'; 1024 * 1024 + 1]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("stdin limit"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_non_utf8_arguments_without_panicking() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let out = Command::new(env!("CARGO_BIN_EXE_calc"))
+        .arg(OsString::from_vec(vec![b'1', 0x80]))
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run calc");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("valid UTF-8"));
 }
