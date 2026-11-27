@@ -50,7 +50,11 @@ All positional arguments are joined with spaces before evaluation, so `calc 2 + 
 
 ## Config
 
-Reads `~/.config/calc/config.toml` if present. Flags override the file; defaults apply otherwise.
+Optional. Reads `~/.config/calc/config.toml` if present. Flags override the file; defaults apply otherwise.
+
+```toml
+precision = 12
+```
 
 ## Install
 
